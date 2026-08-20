@@ -3,7 +3,7 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     MessageHandler,
-    filters,
+    filters
 )
 
 from config import BOT_TOKEN
@@ -12,32 +12,54 @@ from handlers import *
 
 
 def main():
+
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN is not set")
 
-    # Инициализация БД
     init_db()
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = (
+        Application
+        .builder()
+        .token(BOT_TOKEN)
+        .build()
+    )
 
     # =========================
-    # Команды
+    # КОМАНДЫ
     # =========================
 
-    app.add_handler(CommandHandler("start", start))
+    app.add_handler(
+        CommandHandler("start", start)
+    )
 
-    # Старые команды пока оставляем,
-    # чтобы текущая версия не потеряла совместимость.
-    app.add_handler(CommandHandler("take", take_cmd))
-    app.add_handler(CommandHandler("add", add_cmd))
-    app.add_handler(CommandHandler("del", del_cmd))
-    app.add_handler(CommandHandler("list", list_cmd))
-    app.add_handler(CommandHandler("addadmin", addadmin_cmd))
-    app.add_handler(CommandHandler("deladmin", deladmin_cmd))
-    app.add_handler(CommandHandler("addnumber", addnumber_cmd))
+    app.add_handler(
+        CommandHandler("take", take_cmd)
+    )
+
+    app.add_handler(
+        CommandHandler("add", add_cmd)
+    )
+
+    app.add_handler(
+        CommandHandler("del", del_cmd)
+    )
+
+    app.add_handler(
+        CommandHandler("list", list_cmd)
+    )
+
+    app.add_handler(
+        CommandHandler("addadmin", addadmin_cmd)
+    )
+
+    app.add_handler(
+        CommandHandler("deladmin", deladmin_cmd)
+    )
+
 
     # =========================
-    # Пользователь
+    # ПОЛЬЗОВАТЕЛЬ
     # =========================
 
     app.add_handler(
@@ -64,12 +86,13 @@ def main():
     app.add_handler(
         CallbackQueryHandler(
             my_request,
-            pattern=r"^my_request$"
+            pattern=r"^my_requests$"
         )
     )
 
+
     # =========================
-    # Админка
+    # АДМИНКА
     # =========================
 
     app.add_handler(
@@ -88,6 +111,13 @@ def main():
 
     app.add_handler(
         CallbackQueryHandler(
+            take_callback,
+            pattern=r"^take:\d+$"
+        )
+    )
+
+    app.add_handler(
+        CallbackQueryHandler(
             reviews,
             pattern=r"^reviews$"
         )
@@ -100,8 +130,87 @@ def main():
         )
     )
 
+
     # =========================
-    # Текстовые сообщения
+    # ОЧИСТКА ОЧЕРЕДИ
+    # =========================
+
+    app.add_handler(
+        CallbackQueryHandler(
+            clear_queue_confirm,
+            pattern=r"^clear_queue_confirm$"
+        )
+    )
+
+    app.add_handler(
+        CallbackQueryHandler(
+            clear_queue_callback,
+            pattern=r"^clear_queue$"
+        )
+    )
+
+
+    # =========================
+    # ПАНЕЛЬ ВЛАДЕЛЬЦА
+    # =========================
+
+    app.add_handler(
+        CallbackQueryHandler(
+            owner_panel,
+            pattern=r"^owner$"
+        )
+    )
+
+    app.add_handler(
+        CallbackQueryHandler(
+            statistics,
+            pattern=r"^statistics$"
+        )
+    )
+
+    app.add_handler(
+        CallbackQueryHandler(
+            owner_services,
+            pattern=r"^owner_services$"
+        )
+    )
+
+    app.add_handler(
+        CallbackQueryHandler(
+            add_service_start,
+            pattern=r"^add_service$"
+        )
+    )
+
+    app.add_handler(
+        CallbackQueryHandler(
+            owner_admins,
+            pattern=r"^owner_admins$"
+        )
+    )
+
+    app.add_handler(
+        CallbackQueryHandler(
+            add_admin_start,
+            pattern=r"^add_admin$"
+        )
+    )
+
+
+    # =========================
+    # НАЗАД
+    # =========================
+
+    app.add_handler(
+        CallbackQueryHandler(
+            admin_panel,
+            pattern=r"^back_main$"
+        )
+    )
+
+
+    # =========================
+    # ТЕКСТ
     # =========================
 
     app.add_handler(
@@ -110,6 +219,7 @@ def main():
             text_input
         )
     )
+
 
     print("Bot started")
 
