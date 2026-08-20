@@ -19,11 +19,17 @@ def init_db():
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
-        CREATE TABLE IF NOT EXISTS numbers (
+        CREATE TABLE IF NOT EXISTS requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            phone TEXT UNIQUE NOT NULL,
-            status TEXT DEFAULT 'ready',
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            user_id INTEGER NOT NULL,
+            service_id INTEGER NOT NULL,
+            phone TEXT NOT NULL,
+            admin_id INTEGER,
+            code TEXT,
+            status TEXT DEFAULT 'queued',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            taken_at TEXT,
+            completed_at TEXT
         );
 
         CREATE TABLE IF NOT EXISTS admins (
@@ -31,20 +37,6 @@ def init_db():
             username TEXT DEFAULT '',
             is_active INTEGER DEFAULT 1,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        );
-
-        CREATE TABLE IF NOT EXISTS requests (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            service_id INTEGER NOT NULL,
-            number_id INTEGER,
-            phone TEXT,
-            admin_id INTEGER,
-            code TEXT,
-            status TEXT DEFAULT 'queued',
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            taken_at TEXT,
-            completed_at TEXT
         );
 
         CREATE TABLE IF NOT EXISTS balances (
@@ -71,6 +63,12 @@ def init_db():
             details TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE INDEX IF NOT EXISTS idx_requests_queue
+        ON requests(service_id, status, id);
+
+        CREATE INDEX IF NOT EXISTS idx_requests_user
+        ON requests(user_id, status);
         """)
 
 
@@ -108,11 +106,12 @@ def get_service(service_id):
 
 def delete_service(service_id):
     with connect() as c:
-        return c.execute("""
+        cur = c.execute("""
             UPDATE services
             SET is_active=0
             WHERE id=? AND is_active=1
-        """, (service_id,)).rowcount > 0
+        """, (service_id,))
+        return cur.rowcount > 0
 
 
 # =========================
@@ -128,12 +127,8 @@ def create_request(user_id, service_id, phone):
                 phone,
                 status
             )
-            VALUES(?,?,?,'queued')
-        """, (
-            user_id,
-            service_id,
-            phone
-        ))
+            VALUES (?, ?, ?, 'queued')
+        """, (user_id, service_id, phone))
 
         return cur.lastrowid
 
@@ -146,8 +141,7 @@ def get_request(request_id):
                 s.name AS service_name,
                 s.price AS service_price
             FROM requests r
-            JOIN services s
-                ON s.id=r.service_id
+            JOIN services s ON s.id=r.service_id
             WHERE r.id=?
         """, (request_id,)).fetchone()
 
@@ -160,8 +154,7 @@ def user_active_requests(user_id):
                 s.name AS service_name,
                 s.price AS service_price
             FROM requests r
-            JOIN services s
-                ON s.id=r.service_id
+            JOIN services s ON s.id=r.service_id
             WHERE r.user_id=?
               AND r.status IN (
                   'queued',
@@ -172,27 +165,6 @@ def user_active_requests(user_id):
         """, (user_id,)).fetchall()
 
 
-def user_active_request(user_id):
-    with connect() as c:
-        return c.execute("""
-            SELECT
-                r.*,
-                s.name AS service_name,
-                s.price AS service_price
-            FROM requests r
-            JOIN services s
-                ON s.id=r.service_id
-            WHERE r.user_id=?
-              AND r.status IN (
-                  'queued',
-                  'taken',
-                  'pending_review'
-              )
-            ORDER BY r.id DESC
-            LIMIT 1
-        """, (user_id,)).fetchone()
-
-
 def queued_for_service(service_id):
     with connect() as c:
         return c.execute("""
@@ -201,12 +173,25 @@ def queued_for_service(service_id):
                 s.name AS service_name,
                 s.price AS service_price
             FROM requests r
-            JOIN services s
-                ON s.id=r.service_id
+            JOIN services s ON s.id=r.service_id
             WHERE r.service_id=?
               AND r.status='queued'
             ORDER BY r.id
         """, (service_id,)).fetchall()
+
+
+def get_pending_reviews():
+    with connect() as c:
+        return c.execute("""
+            SELECT
+                r.*,
+                s.name AS service_name,
+                s.price
+            FROM requests r
+            JOIN services s ON s.id=r.service_id
+            WHERE r.status='pending_review'
+            ORDER BY r.id
+        """).fetchall()
 
 
 # =========================
@@ -215,7 +200,6 @@ def queued_for_service(service_id):
 
 def take_request(request_id, admin_id):
     with connect() as c:
-
         cur = c.execute("""
             UPDATE requests
             SET
@@ -224,37 +208,30 @@ def take_request(request_id, admin_id):
                 taken_at=CURRENT_TIMESTAMP
             WHERE id=?
               AND status='queued'
-        """, (
-            admin_id,
-            request_id
-        ))
+        """, (admin_id, request_id))
 
         if cur.rowcount != 1:
             return False
 
         c.execute("""
-            INSERT INTO logs(
-                actor_id,
-                action,
-                request_id
-            )
-            VALUES(?,?,?)
-        """, (
-            admin_id,
-            "take_request",
-            request_id
-        ))
+            INSERT INTO logs(actor_id, action, request_id)
+            VALUES (?, ?, ?)
+        """, (admin_id, "take_request", request_id))
 
         return True
 
 
 # =========================
-# INTERNAL CODE
+# INTERNAL APP CODE
 # =========================
 
 def submit_code(request_id, user_id, code):
-    with connect() as c:
+    code = str(code).strip()
 
+    if not code or len(code) > 32:
+        return False
+
+    with connect() as c:
         cur = c.execute("""
             UPDATE requests
             SET
@@ -263,11 +240,7 @@ def submit_code(request_id, user_id, code):
             WHERE id=?
               AND user_id=?
               AND status='taken'
-        """, (
-            code,
-            request_id,
-            user_id
-        ))
+        """, (code, request_id, user_id))
 
         if cur.rowcount != 1:
             return False
@@ -279,12 +252,12 @@ def submit_code(request_id, user_id, code):
                 request_id,
                 details
             )
-            VALUES(?,?,?,?)
+            VALUES (?, ?, ?, ?)
         """, (
             user_id,
-            "submit_code",
+            "submit_internal_code",
             request_id,
-            code
+            "internal_app_verification"
         ))
 
         return True
@@ -296,14 +269,13 @@ def submit_code(request_id, user_id, code):
 
 def review_request(request_id, admin_id, approve):
     with connect() as c:
-
         row = c.execute("""
             SELECT
                 r.*,
-                s.price
+                s.price,
+                s.name AS service_name
             FROM requests r
-            JOIN services s
-                ON s.id=r.service_id
+            JOIN services s ON s.id=r.service_id
             WHERE r.id=?
         """, (request_id,)).fetchone()
 
@@ -313,12 +285,7 @@ def review_request(request_id, admin_id, approve):
         if row["status"] != "pending_review":
             return None
 
-        new_status = (
-            "approved"
-            if approve
-            else
-            "rejected"
-        )
+        new_status = "approved" if approve else "rejected"
 
         c.execute("""
             UPDATE requests
@@ -326,27 +293,20 @@ def review_request(request_id, admin_id, approve):
                 status=?,
                 completed_at=CURRENT_TIMESTAMP
             WHERE id=?
-        """, (
-            new_status,
-            request_id
-        ))
+        """, (new_status, request_id))
 
         if approve:
-
             c.execute("""
                 INSERT INTO balances(
                     user_id,
                     balance,
                     total_earned
                 )
-                VALUES(?,?,?)
+                VALUES (?, ?, ?)
                 ON CONFLICT(user_id)
                 DO UPDATE SET
-                    balance =
-                        balance + excluded.balance,
-                    total_earned =
-                        total_earned
-                        + excluded.total_earned
+                    balance=balance+excluded.balance,
+                    total_earned=total_earned+excluded.total_earned
             """, (
                 row["user_id"],
                 row["price"],
@@ -360,24 +320,23 @@ def review_request(request_id, admin_id, approve):
                 request_id,
                 details
             )
-            VALUES(?,?,?,?)
+            VALUES (?, ?, ?, ?)
         """, (
             admin_id,
             new_status,
             request_id,
-            row["code"]
+            "request_review"
         ))
 
         return dict(row)
 
 
 # =========================
-# QUEUE CLEANUP
+# QUEUE
 # =========================
 
 def expire_old_requests():
     with connect() as c:
-
         cur = c.execute("""
             UPDATE requests
             SET
@@ -387,13 +346,11 @@ def expire_old_requests():
               AND datetime(created_at)
                   <= datetime('now', '-90 minutes')
         """)
-
         return cur.rowcount
 
 
 def clear_queue():
     with connect() as c:
-
         cur = c.execute("""
             UPDATE requests
             SET
@@ -405,11 +362,8 @@ def clear_queue():
         count = cur.rowcount
 
         c.execute("""
-            INSERT INTO logs(
-                action,
-                details
-            )
-            VALUES(?,?)
+            INSERT INTO logs(action, details)
+            VALUES (?, ?)
         """, (
             "clear_queue",
             f"expired={count}"
@@ -424,9 +378,8 @@ def clear_queue():
 
 def get_balance(user_id):
     with connect() as c:
-
         row = c.execute("""
-            SELECT *
+            SELECT balance, total_earned
             FROM balances
             WHERE user_id=?
         """, (user_id,)).fetchone()
@@ -434,18 +387,14 @@ def get_balance(user_id):
         if not row:
             return 0.0, 0.0
 
-        return (
-            row["balance"],
-            row["total_earned"]
-        )
+        return row["balance"], row["total_earned"]
 
 
 def reserve_withdrawal(user_id, amount):
     with connect() as c:
-
         c.execute("""
             INSERT OR IGNORE INTO balances(user_id)
-            VALUES(?)
+            VALUES (?)
         """, (user_id,))
 
         cur = c.execute("""
@@ -453,25 +402,15 @@ def reserve_withdrawal(user_id, amount):
             SET balance=balance-?
             WHERE user_id=?
               AND balance>=?
-        """, (
-            amount,
-            user_id,
-            amount
-        ))
+        """, (amount, user_id, amount))
 
         if cur.rowcount != 1:
             return None
 
         cur = c.execute("""
-            INSERT INTO withdrawals(
-                user_id,
-                amount
-            )
-            VALUES(?,?)
-        """, (
-            user_id,
-            amount
-        ))
+            INSERT INTO withdrawals(user_id, amount)
+            VALUES (?, ?)
+        """, (user_id, amount))
 
         return cur.lastrowid
 
@@ -482,29 +421,22 @@ def reserve_withdrawal(user_id, amount):
 
 def add_admin(tg_id, username=""):
     with connect() as c:
-
         c.execute("""
             INSERT INTO admins(
                 tg_id,
                 username,
                 is_active
             )
-            VALUES(?,?,1)
-
+            VALUES (?, ?, 1)
             ON CONFLICT(tg_id)
             DO UPDATE SET
-                username=?,
+                username=excluded.username,
                 is_active=1
-        """, (
-            tg_id,
-            username,
-            username
-        ))
+        """, (tg_id, username))
 
 
 def remove_admin(tg_id):
     with connect() as c:
-
         c.execute("""
             UPDATE admins
             SET is_active=0
@@ -514,7 +446,6 @@ def remove_admin(tg_id):
 
 def is_admin(tg_id):
     with connect() as c:
-
         return c.execute("""
             SELECT 1
             FROM admins
@@ -525,7 +456,6 @@ def is_admin(tg_id):
 
 def list_admins():
     with connect() as c:
-
         return c.execute("""
             SELECT *
             FROM admins
@@ -540,7 +470,6 @@ def list_admins():
 
 def get_statistics():
     with connect() as c:
-
         users = c.execute("""
             SELECT COUNT(DISTINCT user_id)
             FROM requests
@@ -588,13 +517,9 @@ def get_statistics():
         """).fetchone()[0]
 
         paid = c.execute("""
-            SELECT COALESCE(
-                SUM(s.price),
-                0
-            )
+            SELECT COALESCE(SUM(s.price), 0)
             FROM requests r
-            JOIN services s
-                ON s.id=r.service_id
+            JOIN services s ON s.id=r.service_id
             WHERE r.status='approved'
         """).fetchone()[0]
 
@@ -609,29 +534,3 @@ def get_statistics():
             "expired": expired,
             "paid": paid
         }
-
-
-# =========================
-# NUMBERS
-# =========================
-
-def add_number(phone):
-    with connect() as c:
-
-        c.execute("""
-            INSERT OR IGNORE INTO numbers(
-                phone,
-                status
-            )
-            VALUES(?,'ready')
-        """, (phone,))
-
-
-def list_numbers():
-    with connect() as c:
-
-        return c.execute("""
-            SELECT *
-            FROM numbers
-            ORDER BY id
-        """).fetchall()
