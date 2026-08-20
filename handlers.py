@@ -14,6 +14,8 @@ from config import MIN_WITHDRAWAL
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
 
+    context.user_data.clear()
+
     await update.message.reply_text(
         "👋 Добро пожаловать!\n\nВыберите действие:",
         reply_markup=main_menu(
@@ -24,7 +26,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# СЕРВИСЫ
+# SERVICES
 # =========================
 
 async def services(update, context):
@@ -53,7 +55,7 @@ async def choose_service(update, context):
     service = get_service(service_id)
 
     if not service:
-        await q.message.reply_text(
+        await q.message.edit_text(
             "❌ Сервис больше недоступен."
         )
         return
@@ -61,14 +63,14 @@ async def choose_service(update, context):
     context.user_data["creating_service"] = service_id
 
     await q.message.edit_text(
-        f"🏪 Сервис: {service['name']}\n"
+        f"🏪 {service['name']}\n"
         f"💰 Начисление: ${service['price']:.2f}\n\n"
         "📱 Отправьте номер для заявки."
     )
 
 
 # =========================
-# ВВОД НОМЕРА
+# PHONE
 # =========================
 
 async def phone_input(update, context):
@@ -91,8 +93,17 @@ async def phone_input(update, context):
         context.user_data.pop("creating_service", None)
 
         await update.message.reply_text(
-            "❌ Этот сервис больше недоступен."
+            "❌ Сервис больше недоступен."
         )
+        return
+
+    active = user_active_requests(update.effective_user.id)
+
+    if active:
+        await update.message.reply_text(
+            "⚠️ У вас уже есть активная заявка."
+        )
+        context.user_data.pop("creating_service", None)
         return
 
     rid = create_request(
@@ -105,15 +116,15 @@ async def phone_input(update, context):
 
     await update.message.reply_text(
         f"✅ Заявка #{rid} создана!\n\n"
-        f"🏪 Сервис: {service['name']}\n"
-        f"📱 Номер: {phone}\n"
-        f"💰 Начисление: ${service['price']:.2f}\n\n"
+        f"🏪 {service['name']}\n"
+        f"📱 {phone}\n"
+        f"💰 ${service['price']:.2f}\n\n"
         "⏳ Ожидайте администратора."
     )
 
 
 # =========================
-# БАЛАНС
+# BALANCE
 # =========================
 
 async def balance(update, context):
@@ -131,46 +142,41 @@ async def balance(update, context):
 
 
 # =========================
-# МОИ ЗАЯВКИ
+# MY REQUESTS
 # =========================
 
 async def my_request(update, context):
     q = update.callback_query
     await q.answer()
 
-    requests = user_active_requests(q.from_user.id)
+    rows = user_active_requests(q.from_user.id)
 
-    if not requests:
+    if not rows:
         await q.message.edit_text(
             "📭 Активных заявок нет."
         )
         return
 
-    text = "📊 Ваши заявки:\n\n"
-
-    status_names = {
+    names = {
         "queued": "⏳ В очереди",
         "taken": "🔄 В работе",
         "pending_review": "🔎 На проверке"
     }
 
-    for r in requests:
-        status = status_names.get(
-            r["status"],
-            r["status"]
-        )
+    text = "📊 Ваши заявки:\n\n"
 
+    for r in rows:
         text += (
             f"#{r['id']} — {r['service_name']}\n"
             f"📱 {r['phone']}\n"
-            f"{status}\n\n"
+            f"{names.get(r['status'], r['status'])}\n\n"
         )
 
     await q.message.edit_text(text)
 
 
 # =========================
-# АДМИНКА
+# ADMIN PANEL
 # =========================
 
 async def admin_panel(update, context):
@@ -178,9 +184,7 @@ async def admin_panel(update, context):
     await q.answer()
 
     if not has_admin_access(q.from_user.id):
-        await q.message.reply_text(
-            "❌ Доступ запрещён."
-        )
+        await q.message.edit_text("❌ Доступ запрещён.")
         return
 
     rows = list_services()
@@ -193,7 +197,7 @@ async def admin_panel(update, context):
 
 
 # =========================
-# ОЧЕРЕДЬ СЕРВИСА
+# SERVICE QUEUE
 # =========================
 
 async def queue(update, context):
@@ -205,35 +209,44 @@ async def queue(update, context):
 
     service_id = int(q.data.split(":")[1])
 
-    # Сначала удаляем заявки старше 90 минут
     expire_old_requests()
+
+    service = get_service(service_id)
+
+    if not service:
+        await q.message.edit_text("❌ Сервис не найден.")
+        return
 
     rows = queued_for_service(service_id)
 
     if not rows:
         await q.message.edit_text(
-            "📭 Очередь пуста."
+            f"📭 Очередь «{service['name']}» пуста."
         )
         return
+
+    await q.message.edit_text(
+        f"📥 Очередь: {service['name']}\n\n"
+        f"Заявок: {len(rows)}"
+    )
 
     for r in rows:
         await q.message.reply_text(
             f"📥 Заявка #{r['id']}\n\n"
-            f"👤 Пользователь: {r['user_id']}\n"
-            f"🏪 Сервис: {r['service_name']}\n"
-            f"📱 Номер: {r['phone']}\n"
-            f"💰 Начисление: ${r['service_price']:.2f}",
+            f"👤 ID: {r['user_id']}\n"
+            f"🏪 {r['service_name']}\n"
+            f"📱 {r['phone']}\n"
+            f"💰 ${r['service_price']:.2f}",
             reply_markup=take_request_keyboard(r["id"])
         )
 
 
 # =========================
-# ВЗЯТЬ ЗАЯВКУ
+# TAKE
 # =========================
 
 async def take_callback(update, context):
     q = update.callback_query
-    await q.answer()
 
     if not has_admin_access(q.from_user.id):
         await q.answer(
@@ -242,14 +255,13 @@ async def take_callback(update, context):
         )
         return
 
+    await q.answer()
+
     rid = int(q.data.split(":")[1])
 
-    if not take_request(
-        rid,
-        q.from_user.id
-    ):
+    if not take_request(rid, q.from_user.id):
         await q.answer(
-            "❌ Заявка уже взята или недоступна.",
+            "❌ Заявка уже взята.",
             show_alert=True
         )
         return
@@ -259,20 +271,18 @@ async def take_callback(update, context):
     if not r:
         return
 
-    await q.message.edit_reply_markup(
-        reply_markup=None
-    )
+    await q.message.edit_reply_markup(None)
 
     await q.message.reply_text(
         f"✅ Заявка #{rid} взята.\n\n"
-        f"🏪 Сервис: {r['service_name']}\n"
-        f"📱 Номер: {r['phone']}"
+        f"🏪 {r['service_name']}\n"
+        f"📱 {r['phone']}"
     )
 
     try:
         await context.bot.send_message(
             r["user_id"],
-            f"📱 Ваш номер {r['phone']} взят в работу!\n\n"
+            f"📱 Ваша заявка #{rid} взята администратором.\n\n"
             "Ожидайте дальнейших инструкций."
         )
     except Exception:
@@ -280,7 +290,7 @@ async def take_callback(update, context):
 
 
 # =========================
-# ПРОВЕРКА ЗАЯВОК
+# REVIEWS
 # =========================
 
 async def reviews(update, context):
@@ -290,18 +300,7 @@ async def reviews(update, context):
     if not has_admin_access(q.from_user.id):
         return
 
-    with connect() as c:
-        rows = c.execute("""
-            SELECT
-                r.*,
-                s.name AS service_name,
-                s.price
-            FROM requests r
-            JOIN services s
-              ON s.id=r.service_id
-            WHERE r.status='pending_review'
-            ORDER BY r.id
-        """).fetchall()
+    rows = get_pending_reviews()
 
     if not rows:
         await q.message.edit_text(
@@ -309,26 +308,36 @@ async def reviews(update, context):
         )
         return
 
+    await q.message.edit_text(
+        f"🔎 На проверке: {len(rows)}"
+    )
+
     for r in rows:
         await q.message.reply_text(
             f"📨 Заявка #{r['id']}\n\n"
-            f"🏪 Сервис: {r['service_name']}\n"
-            f"📱 Номер: {r['phone']}\n"
-            f"💰 Начисление: ${r['price']:.2f}",
+            f"👤 ID: {r['user_id']}\n"
+            f"🏪 {r['service_name']}\n"
+            f"📱 {r['phone']}\n"
+            f"💰 ${r['price']:.2f}",
             reply_markup=review_keyboard(r["id"])
         )
 
 
 # =========================
-# РЕШЕНИЕ ПО ЗАЯВКЕ
+# REVIEW ACTION
 # =========================
 
 async def review(update, context):
     q = update.callback_query
-    await q.answer()
 
     if not has_admin_access(q.from_user.id):
+        await q.answer(
+            "❌ Доступ запрещён.",
+            show_alert=True
+        )
         return
+
+    await q.answer()
 
     action, rid = q.data.split(":")
     rid = int(rid)
@@ -341,15 +350,14 @@ async def review(update, context):
 
     if not result:
         await q.message.edit_text(
-            "❌ Заявка уже обработана или не найдена."
+            "❌ Заявка уже обработана."
         )
         return
 
     if action == "approve":
-
         await q.message.edit_text(
-            f"✅ Заявка #{rid} подтверждена.\n"
-            f"Начислено: ${result['price']:.2f}"
+            f"✅ Заявка #{rid} подтверждена.\n\n"
+            f"💰 Начислено: ${result['price']:.2f}"
         )
 
         text = (
@@ -358,7 +366,6 @@ async def review(update, context):
         )
 
     else:
-
         await q.message.edit_text(
             f"❌ Заявка #{rid} отклонена."
         )
@@ -378,7 +385,7 @@ async def review(update, context):
 
 
 # =========================
-# ОЧИСТКА ОЧЕРЕДИ
+# CLEAR QUEUE
 # =========================
 
 async def clear_queue_confirm(update, context):
@@ -390,8 +397,7 @@ async def clear_queue_confirm(update, context):
 
     await q.message.edit_text(
         "⚠️ Вы уверены?\n\n"
-        "Все заявки, которые сейчас находятся "
-        "в очереди, будут отменены.",
+        "Все заявки во всех очередях будут отменены.",
         reply_markup=clear_queue_keyboard()
     )
 
@@ -412,7 +418,7 @@ async def clear_queue_callback(update, context):
 
 
 # =========================
-# ПАНЕЛЬ ВЛАДЕЛЬЦА
+# OWNER
 # =========================
 
 async def owner_panel(update, context):
@@ -420,9 +426,8 @@ async def owner_panel(update, context):
     await q.answer()
 
     if not is_superadmin(q.from_user.id):
-        await q.answer(
-            "❌ Только владелец.",
-            show_alert=True
+        await q.message.edit_text(
+            "❌ Только владелец."
         )
         return
 
@@ -432,10 +437,6 @@ async def owner_panel(update, context):
         reply_markup=owner_panel_keyboard()
     )
 
-
-# =========================
-# СТАТИСТИКА
-# =========================
 
 async def statistics(update, context):
     q = update.callback_query
@@ -462,7 +463,7 @@ async def statistics(update, context):
 
 
 # =========================
-# ВЛАДЕЛЕЦ — СЕРВИСЫ
+# OWNER SERVICES
 # =========================
 
 async def owner_services(update, context):
@@ -480,10 +481,6 @@ async def owner_services(update, context):
     )
 
 
-# =========================
-# ДОБАВЛЕНИЕ СЕРВИСА
-# =========================
-
 async def add_service_start(update, context):
     q = update.callback_query
     await q.answer()
@@ -499,7 +496,7 @@ async def add_service_start(update, context):
 
 
 # =========================
-# АДМИНЫ
+# OWNER ADMINS
 # =========================
 
 async def owner_admins(update, context):
@@ -532,21 +529,20 @@ async def add_admin_start(update, context):
 
 
 # =========================
-# ТЕКСТОВЫЙ ВВОД
+# TEXT INPUT
 # =========================
 
 async def text_input(update, context):
 
-    # Пользователь вводит номер
+    # Номер заявки
     if context.user_data.get("creating_service"):
         await phone_input(update, context)
         return
 
-    # Добавление сервиса владельцем
     action = context.user_data.get("owner_action")
 
+    # Название сервиса
     if action == "add_service_name":
-
         name = update.message.text.strip()
 
         if not name:
@@ -556,13 +552,13 @@ async def text_input(update, context):
         context.user_data["owner_action"] = "add_service_price"
 
         await update.message.reply_text(
-            "💰 Теперь отправьте цену сервиса.\n\n"
+            "💰 Отправьте цену сервиса.\n\n"
             "Например: 0.70"
         )
         return
 
+    # Цена сервиса
     if action == "add_service_price":
-
         try:
             price = parse_price(
                 update.message.text.strip()
@@ -578,24 +574,14 @@ async def text_input(update, context):
         )
 
         try:
-            sid = add_service(
-                name,
-                price
-            )
+            sid = add_service(name, price)
         except Exception:
             await update.message.reply_text(
                 "❌ Такой сервис уже существует."
             )
             return
 
-        context.user_data.pop(
-            "new_service_name",
-            None
-        )
-        context.user_data.pop(
-            "owner_action",
-            None
-        )
+        context.user_data.clear()
 
         await update.message.reply_text(
             f"✅ Сервис добавлен!\n\n"
@@ -606,11 +592,8 @@ async def text_input(update, context):
 
     # Добавление администратора
     if action == "add_admin":
-
         try:
-            tg_id = int(
-                update.message.text.strip()
-            )
+            tg_id = int(update.message.text.strip())
         except ValueError:
             await update.message.reply_text(
                 "❌ Telegram ID должен быть числом."
@@ -619,10 +602,7 @@ async def text_input(update, context):
 
         add_admin(tg_id)
 
-        context.user_data.pop(
-            "owner_action",
-            None
-        )
+        context.user_data.clear()
 
         await update.message.reply_text(
             "✅ Администратор добавлен."
@@ -631,14 +611,11 @@ async def text_input(update, context):
 
 
 # =========================
-# СТАРЫЕ КОМАНДЫ ВЛАДЕЛЬЦА
+# COMMANDS
 # =========================
 
 async def add_cmd(update, context):
     if not is_superadmin(update.effective_user.id):
-        await update.message.reply_text(
-            "❌ Только владелец."
-        )
         return
 
     if len(context.args) < 2:
@@ -647,19 +624,11 @@ async def add_cmd(update, context):
         )
         return
 
-    name = " ".join(
-        context.args[:-1]
-    )
-
-    price = parse_price(
-        context.args[-1]
-    )
+    name = " ".join(context.args[:-1])
+    price = parse_price(context.args[-1])
 
     try:
-        sid = add_service(
-            name,
-            price
-        )
+        sid = add_service(name, price)
     except Exception:
         await update.message.reply_text(
             "❌ Такой сервис уже существует."
@@ -679,9 +648,15 @@ async def del_cmd(update, context):
     if not context.args:
         return
 
-    ok = delete_service(
-        int(context.args[0])
-    )
+    try:
+        service_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text(
+            "❌ ID должен быть числом."
+        )
+        return
+
+    ok = delete_service(service_id)
 
     await update.message.reply_text(
         "✅ Сервис удалён."
@@ -705,9 +680,7 @@ async def list_cmd(update, context):
 
     await update.message.reply_text(
         "\n".join(
-            f"#{r['id']} — "
-            f"{r['name']} — "
-            f"${r['price']:.2f}"
+            f"#{r['id']} — {r['name']} — ${r['price']:.2f}"
             for r in rows
         )
     )
@@ -720,8 +693,13 @@ async def addadmin_cmd(update, context):
     if not context.args:
         return
 
+    try:
+        tg_id = int(context.args[0])
+    except ValueError:
+        return
+
     add_admin(
-        int(context.args[0]),
+        tg_id,
         ""
     )
 
@@ -737,9 +715,12 @@ async def deladmin_cmd(update, context):
     if not context.args:
         return
 
-    remove_admin(
-        int(context.args[0])
-    )
+    try:
+        tg_id = int(context.args[0])
+    except ValueError:
+        return
+
+    remove_admin(tg_id)
 
     await update.message.reply_text(
         "✅ Администратор удалён."
