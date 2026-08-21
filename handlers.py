@@ -13,9 +13,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     context.user_data.clear()
     await update.message.reply_text(
-        "👋 Добро пожаловать в <b>Willy SMS 24/7</b>!\n\nВыберите действие:",
-        reply_markup=main_menu(has_admin_access(uid), is_superadmin(uid)),
-        parse_mode="HTML"
+        "👋 Добро пожаловать в Willy SMS 24/7!\n\nВыберите действие:",
+        reply_markup=main_menu(has_admin_access(uid), is_superadmin(uid))
     )
 
 
@@ -25,9 +24,8 @@ async def back_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = q.from_user.id
     context.user_data.clear()
     await q.message.edit_text(
-        "👋 Добро пожаловать в <b>Willy SMS 24/7</b>!\n\nВыберите действие:",
-        reply_markup=main_menu(has_admin_access(uid), is_superadmin(uid)),
-        parse_mode="HTML"
+        "👋 Добро пожаловать в Willy SMS 24/7!\n\nВыберите действие:",
+        reply_markup=main_menu(has_admin_access(uid), is_superadmin(uid))
     )
 
 
@@ -71,10 +69,9 @@ async def confirm_services(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["pending_services"] = list(selected)
     await q.message.edit_text(
         "📱 Теперь отправьте номер телефона, на который будет приходить SMS.\n\n"
-        "Примеры:\n<code>+79867345674</code>\n<code>+7 983 734 62 95</code>\n<code>89837346295</code>\n\n"
+        "Примеры:\n+79867345674\n+7 983 734 62 95\n89837346295\n\n"
         "Просто напишите номер в чат:",
-        reply_markup=back_main_keyboard(),
-        parse_mode="HTML"
+        reply_markup=back_main_keyboard()
     )
     return WAITING_PHONE
 
@@ -83,8 +80,7 @@ async def receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     phone = normalize_phone(update.message.text or "")
     if not phone:
         await update.message.reply_text(
-            "❌ Некорректный номер. Попробуйте ещё раз.\nПример: <code>+79867345674</code>",
-            parse_mode="HTML"
+            "❌ Некорректный номер. Попробуйте ещё раз.\nПример: +79867345674"
         )
         return WAITING_PHONE
 
@@ -242,9 +238,7 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_action(update.effective_user.id, "send_code", target["id"], text)
 
     await update.message.reply_text(
-        "✅ <b>Код принят!</b>\n\n"
-        "Он отправлен администратору на проверку.\n"
-        "Ожидайте результата ⏳",
+        "✅ <b>Код принят!</b>\n\nОн отправлен администратору на проверку.\nОжидайте результата ⏳",
         parse_mode="HTML"
     )
 
@@ -279,9 +273,7 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(sa, notify_text, reply_markup=markup, parse_mode="HTML")
             except Exception:
                 pass
-
-
-async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+                async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     if not has_admin_access(q.from_user.id):
