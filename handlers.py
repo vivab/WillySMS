@@ -335,14 +335,17 @@ async def show_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def take_request_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-    await q.answer()
     if not has_admin_access(q.from_user.id):
+        await q.answer("Нет доступа", show_alert=True)
         return
 
     rid = int(q.data.split(":")[1])
+
     if not take_request(rid, q.from_user.id):
         await q.answer("❌ Заявка уже взята другим администратором.", show_alert=True)
         return
+
+    await q.answer("✅ Заявка взята!")
 
     r = get_request(rid)
     await q.message.edit_text(
