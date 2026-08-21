@@ -4,6 +4,7 @@ from database import *
 from keyboards import *
 from utils import has_admin_access, is_superadmin, parse_price, normalize_phone
 from config import MIN_WITHDRAWAL, SUPERADMIN_IDS
+from crypto_pay import transfer_crypto, CryptoPayError
 
 WAITING_PHONE = 1
 WAITING_WITHDRAW_AMOUNT = 2
@@ -171,22 +172,39 @@ async def withdraw_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     log_action(update.effective_user.id, "create_withdrawal", details=f"id={wd_id}, amount={amount}")
 
-    for sa in SUPERADMIN_IDS:
-        try:
-            await context.bot.send_message(
-                sa,
-                f"💳 <b>Новая заявка на вывод #{wd_id}</b>\n"
-                f"Пользователь: <code>{update.effective_user.id}</code>\n"
-                f"Сумма: <b>${amount:.2f}</b>",
-                parse_mode="HTML"
-            )
-        except Exception:
-            pass
+    try:
+        result = await transfer_crypto(
+            user_id=update.effective_user.id,
+            amount=amount,
+            spend_id=f"wd_{wd_id}",
+            comment=f"Willy SMS 24/7 — выплата #{wd_id}"
+        )
+    except CryptoPayError as e:
+        process_withdrawal(wd_id, success=False)
+        log_action(update.effective_user.id, "withdraw_failed", wd_id, str(e))
+        await update.message.reply_text(
+            "😔 Упс, вывод временно недоступен, пополняется баланс, попробуйте позже!"
+        )
+        for sa in SUPERADMIN_IDS:
+            try:
+                await context.bot.send_message(
+                    sa,
+                    f"⚠️ <b>Ошибка автовыплаты #{wd_id}</b>\n"
+                    f"Пользователь: <code>{update.effective_user.id}</code>\n"
+                    f"Сумма: ${amount:.2f}\n"
+                    f"Ошибка: {e}",
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
+        return ConversationHandler.END
+
+    process_withdrawal(wd_id, success=True, external_id=str(result.get("transfer_id") or result.get("id") or ""))
+    log_action(update.effective_user.id, "withdraw_paid", wd_id, f"amount={amount}")
 
     await update.message.reply_text(
-        f"✅ Заявка на вывод <b>#{wd_id}</b> создана.\n"
-        f"Сумма <b>${amount:.2f}</b> зарезервирована.\n"
-        f"Ожидайте обработки.",
+        f"✅ <b>Выплата #{wd_id} выполнена!</b>\n\n"
+        f"💰 Сумма: <b>${amount:.2f}</b> в USDT зачислена в @CryptoBot 🎉",
         parse_mode="HTML"
     )
     return ConversationHandler.END
@@ -273,6 +291,8 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(sa, notify_text, reply_markup=markup, parse_mode="HTML")
             except Exception:
                 pass
+
+
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
