@@ -1,7 +1,11 @@
 """
-Adapter for your own/authorized SMS service.
+Adapter for your own / authorized SMS provider.
 This module intentionally does not intercept third-party OTP messages.
 """
-def send_sms(phone: str, service_name: str) -> bool:
-    # Integrate your own authorized SMS provider here.
-    return True
+
+async def on_request_taken(phone: str, request_id: int, service_name: str):
+    pass
+
+
+async def on_request_completed(phone: str, request_id: int, approved: bool):
+    pass
