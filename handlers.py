@@ -4,7 +4,7 @@ from database import *
 from keyboards import *
 from utils import has_admin_access, is_superadmin, parse_price, normalize_phone
 from config import MIN_WITHDRAWAL, SUPERADMIN_IDS
-from crypto_pay import transfer_crypto, CryptoPayError
+from crypto_pay import transfer_crypto, create_invoice, CryptoPayError
 
 WAITING_PHONE = 1
 WAITING_WITHDRAW_AMOUNT = 2
@@ -601,6 +601,36 @@ async def fail_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     ok = process_withdrawal(int(context.args[0]), success=False)
     await update.message.reply_text("✅ Отклонено, средства возвращены" if ok else "❌ Ошибка")
+
+
+async def topup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_superadmin(update.effective_user.id):
+        return
+    if not context.args:
+        await update.message.reply_text("Использование: /topup СУММА\nНапример: /topup 10")
+        return
+    try:
+        amount = float(context.args[0].replace(",", "."))
+    except ValueError:
+        await update.message.reply_text("Введите число, например /topup 10")
+        return
+
+    try:
+        invoice = await create_invoice(amount, description="Пополнение баланса приложения WillySMS 24/7")
+    except CryptoPayError as e:
+        await update.message.reply_text(f"❌ Ошибка создания счёта: {e}")
+        return
+
+    pay_url = invoice.get("bot_invoice_url") or invoice.get("pay_url")
+    await update.message.reply_text(
+        f"💳 <b>Счёт на пополнение создан</b>\n\n"
+        f"Сумма: <b>${amount:.2f}</b>\n"
+        f"ID счёта: <code>{invoice.get('invoice_id')}</code>\n\n"
+        f"👉 Оплатите по ссылке (со своего личного баланса в @CryptoBot):\n{pay_url}\n\n"
+        f"После оплаты сумма зачислится на баланс приложения WillySMS.",
+        parse_mode="HTML",
+        disable_web_page_preview=True
+    )
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
