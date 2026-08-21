@@ -273,7 +273,7 @@ async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(sa, notify_text, reply_markup=markup, parse_mode="HTML")
             except Exception:
                 pass
-                async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     if not has_admin_access(q.from_user.id):
