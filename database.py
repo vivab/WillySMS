@@ -64,6 +64,10 @@ def init_db():
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
         """)
+        # Включаем WAL-режим, чтобы читатели и писатели меньше блокировали друг друга,
+        # и увеличиваем таймаут ожидания снятия блокировки.
+        c.execute("PRAGMA journal_mode=WAL;")
+        c.execute("PRAGMA busy_timeout=5000;")
 
 
 def log_action(actor_id, action, request_id=None, details=""):
@@ -170,16 +174,24 @@ def queued_for_service(service_id: int):
 
 
 def take_request(request_id: int, admin_id: int) -> bool:
+    # ВАЖНО: log_action открывает СВОЁ отдельное соединение с БД.
+    # Если вызвать её внутри ещё не завершённого блока `with connect() as c:`,
+    # второе соединение натыкается на блокировку первого -> "database is locked".
+    # Поэтому сначала полностью завершаем (и коммитим) обновление, закрываем
+    # соединение, и только потом логируем действие отдельным вызовом.
     with connect() as c:
         cur = c.execute("""
             UPDATE requests
             SET status = 'taken', admin_id = ?, taken_at = CURRENT_TIMESTAMP
             WHERE id = ? AND status = 'queued'
         """, (admin_id, request_id))
-        if cur.rowcount != 1:
-            return False
-        log_action(admin_id, "take_request", request_id)
-        return True
+        success = cur.rowcount == 1
+
+    if not success:
+        return False
+
+    log_action(admin_id, "take_request", request_id)
+    return True
 
 
 def submit_code(request_id: int, user_id: int, code: str) -> bool:
@@ -204,6 +216,9 @@ def get_pending_reviews():
 
 
 def review_request(request_id: int, admin_id: int, approve: bool):
+    # Та же логика, что и в take_request: сначала завершаем транзакцию
+    # с обновлением статуса/баланса, закрываем соединение, и только
+    # потом отдельно логируем действие через log_action.
     with connect() as c:
         row = c.execute("""
             SELECT r.*, s.price
@@ -230,8 +245,10 @@ def review_request(request_id: int, admin_id: int, approve: bool):
                     total_earned = total_earned + excluded.total_earned
             """, (row["user_id"], row["price"], row["price"]))
 
-        log_action(admin_id, new_status, request_id, row["code"] or "")
-        return dict(row)
+        result = dict(row)
+
+    log_action(admin_id, new_status, request_id, row["code"] or "")
+    return result
 
 
 def get_balance(user_id: int) -> tuple[float, float]:
