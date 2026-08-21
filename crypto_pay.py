@@ -50,6 +50,39 @@ async def transfer_crypto(user_id: int, amount: float, spend_id: str, comment: s
     return data["result"]
 
 
+async def create_invoice(amount: float, description: str = "Пополнение баланса приложения") -> dict:
+    """
+    Создаёт счёт (invoice) в Crypto Pay на сумму amount в CRYPTO_ASSET.
+    После того как счёт будет оплачен (в том числе тобой самим со своего
+    личного баланса в @CryptoBot), сумма зачисляется на баланс приложения.
+    Возвращает данные счёта, среди которых result['pay_url'] / result['bot_invoice_url']
+    — ссылка, которую нужно открыть и оплатить.
+    """
+    if not CRYPTO_PAY_TOKEN:
+        raise CryptoPayError("CRYPTO_PAY_TOKEN не задан в переменных окружения")
+
+    payload = {
+        "asset": CRYPTO_ASSET,
+        "amount": f"{amount:.2f}",
+        "description": description[:1024],
+    }
+
+    headers = {"Crypto-Pay-API-Token": CRYPTO_PAY_TOKEN}
+
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(f"{CRYPTO_PAY_API_URL}/createInvoice", json=payload, headers=headers)
+            data = resp.json()
+    except (httpx.HTTPError, ValueError) as e:
+        raise CryptoPayError(f"Сетевая ошибка Crypto Pay: {e}")
+
+    if not data.get("ok"):
+        error = data.get("error", {}) or {}
+        raise CryptoPayError(f"{error.get('code', '?')}: {error.get('name', 'unknown error')}")
+
+    return data["result"]
+
+
 async def get_app_balance() -> dict:
     """
     Возвращает баланс приложения в Crypto Pay по всем валютам.
