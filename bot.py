@@ -39,6 +39,8 @@ def main():
     app.add_handler(CommandHandler("deladmin", deladmin_cmd))
     app.add_handler(CommandHandler("pay", pay_cmd))
     app.add_handler(CommandHandler("fail", fail_cmd))
+    app.add_handler(CommandHandler("topup", topup_cmd))
+
 
     app.add_handler(CallbackQueryHandler(back_main, pattern=r"^back_main$"))
     app.add_handler(CallbackQueryHandler(services, pattern=r"^services$"))
