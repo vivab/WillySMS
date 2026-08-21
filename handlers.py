@@ -1,734 +1,597 @@
 from telegram import Update
-from telegram.ext import ContextTypes
-
+from telegram.ext import ContextTypes, ConversationHandler
 from database import *
 from keyboards import *
-from utils import has_admin_access, is_superadmin, parse_price
-from config import MIN_WITHDRAWAL
+from utils import has_admin_access, is_superadmin, parse_price, normalize_phone
+from config import MIN_WITHDRAWAL, SUPERADMIN_IDS
 
+WAITING_PHONE = 1
+WAITING_WITHDRAW_AMOUNT = 2
 
-# =========================
-# START
-# =========================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-
     context.user_data.clear()
+    await update.message.reply_text(
+        "👋 Добро пожаловать в <b>Willy SMS 24/7</b>!\n\nВыберите действие:",
+        reply_markup=main_menu(has_admin_access(uid), is_superadmin(uid)),
+        parse_mode="HTML"
+    )
+
+
+async def back_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    context.user_data.clear()
+    await q.message.edit_text(
+        "👋 Добро пожаловать в <b>Willy SMS 24/7</b>!\n\nВыберите действие:",
+        reply_markup=main_menu(has_admin_access(uid), is_superadmin(uid)),
+        parse_mode="HTML"
+    )
+
+
+async def services(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    context.user_data["selected"] = set()
+    rows = list_services()
+    if not rows:
+        await q.message.edit_text("Пока нет доступных сервисов.", reply_markup=back_main_keyboard())
+        return
+    await q.message.edit_text(
+        "📋 Выберите один или несколько сервисов:\n(нажмите чтобы отметить ✅)",
+        reply_markup=services_select_keyboard(rows, set())
+    )
+
+
+async def toggle_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    sid = int(q.data.split(":")[1])
+    selected = context.user_data.setdefault("selected", set())
+    if sid in selected:
+        selected.remove(sid)
+    else:
+        selected.add(sid)
+    rows = list_services()
+    await q.message.edit_text(
+        "📋 Выберите один или несколько сервисов:\n(нажмите чтобы отметить ✅)",
+        reply_markup=services_select_keyboard(rows, selected)
+    )
+
+
+async def confirm_services(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    selected = context.user_data.get("selected", set())
+    if not selected:
+        await q.answer("Выберите хотя бы один сервис", show_alert=True)
+        return
+    context.user_data["pending_services"] = list(selected)
+    await q.message.edit_text(
+        "📱 Теперь отправьте номер телефона, на который будет приходить SMS.\n\n"
+        "Примеры:\n<code>+79867345674</code>\n<code>+7 983 734 62 95</code>\n<code>89837346295</code>\n\n"
+        "Просто напишите номер в чат:",
+        reply_markup=back_main_keyboard(),
+        parse_mode="HTML"
+    )
+    return WAITING_PHONE
+
+
+async def receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    phone = normalize_phone(update.message.text or "")
+    if not phone:
+        await update.message.reply_text(
+            "❌ Некорректный номер. Попробуйте ещё раз.\nПример: <code>+79867345674</code>",
+            parse_mode="HTML"
+        )
+        return WAITING_PHONE
+
+    service_ids = context.user_data.get("pending_services", [])
+    if not service_ids:
+        await update.message.reply_text("Сессия устарела. Начните заново /start")
+        return ConversationHandler.END
+
+    active = user_active_requests(update.effective_user.id)
+    if len(active) >= 10:
+        await update.message.reply_text("❌ Слишком много активных заявок. Дождитесь обработки.")
+        return ConversationHandler.END
+
+    ids = create_requests(update.effective_user.id, service_ids, phone)
+    log_action(update.effective_user.id, "create_requests", details=f"ids={ids}, phone={phone}")
+
+    names = []
+    total = 0.0
+    for sid in service_ids:
+        s = get_service(sid)
+        if s:
+            names.append(s["name"])
+            total += s["price"]
+
+    text = (
+        f"✅ <b>Заявки успешно созданы!</b>\n\n"
+        f"📱 Номер: <code>{phone}</code>\n"
+        f"🏷 Сервисы: <b>{', '.join(names)}</b>\n"
+        f"💰 Возможное вознаграждение: <b>${total:.2f}</b>\n\n"
+        f"🔢 Номера заявок: {', '.join(f'#{i}' for i in ids)}\n\n"
+        f"⏳ Ожидайте, пока администратор возьмёт ваш номер в работу."
+    )
+    context.user_data.clear()
+    await update.message.reply_text(
+        text,
+        reply_markup=main_menu(
+            has_admin_access(update.effective_user.id),
+            is_superadmin(update.effective_user.id)
+        ),
+        parse_mode="HTML"
+    )
+    return ConversationHandler.END
+
+
+async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    b, total = get_balance(q.from_user.id)
+    await q.message.edit_text(
+        f"💰 <b>Ваш баланс</b>\n\n"
+        f"Доступно: <b>${b:.2f}</b>\n"
+        f"Всего заработано: <b>${total:.2f}</b>\n"
+        f"Минимальный вывод: <b>${MIN_WITHDRAWAL:.2f}</b>",
+        reply_markup=balance_keyboard(),
+        parse_mode="HTML"
+    )
+
+
+async def withdraw_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    b, _ = get_balance(q.from_user.id)
+    if b < MIN_WITHDRAWAL:
+        await q.answer(f"Минимум для вывода ${MIN_WITHDRAWAL:.2f}", show_alert=True)
+        return
+    await q.message.edit_text(
+        f"Введите сумму для вывода (от ${MIN_WITHDRAWAL:.2f} до ${b:.2f}):",
+        reply_markup=back_main_keyboard()
+    )
+    return WAITING_WITHDRAW_AMOUNT
+
+
+async def withdraw_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        amount = float((update.message.text or "").replace(",", ".").replace("$", "").strip())
+    except ValueError:
+        await update.message.reply_text("Введите число, например 5.5")
+        return WAITING_WITHDRAW_AMOUNT
+
+    if amount < MIN_WITHDRAWAL:
+        await update.message.reply_text(f"Минимум ${MIN_WITHDRAWAL:.2f}")
+        return WAITING_WITHDRAW_AMOUNT
+
+    wd_id = reserve_withdrawal(update.effective_user.id, amount)
+    if not wd_id:
+        await update.message.reply_text("❌ Недостаточно средств или ошибка.")
+        return ConversationHandler.END
+
+    log_action(update.effective_user.id, "create_withdrawal", details=f"id={wd_id}, amount={amount}")
+
+    for sa in SUPERADMIN_IDS:
+        try:
+            await context.bot.send_message(
+                sa,
+                f"💳 <b>Новая заявка на вывод #{wd_id}</b>\n"
+                f"Пользователь: <code>{update.effective_user.id}</code>\n"
+                f"Сумма: <b>${amount:.2f}</b>",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
 
     await update.message.reply_text(
-        "👋 Добро пожаловать!\n\nВыберите действие:",
-        reply_markup=main_menu(
-            has_admin_access(uid),
-            is_superadmin(uid)
-        )
+        f"✅ Заявка на вывод <b>#{wd_id}</b> создана.\n"
+        f"Сумма <b>${amount:.2f}</b> зарезервирована.\n"
+        f"Ожидайте обработки.",
+        parse_mode="HTML"
     )
+    return ConversationHandler.END
 
 
-# =========================
-# SERVICES
-# =========================
-
-async def services(update, context):
+async def my_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-
-    rows = list_services()
-
+    rows = user_active_requests(q.from_user.id)
     if not rows:
-        await q.message.edit_text(
-            "📭 Сейчас доступных сервисов нет."
-        )
+        await q.message.edit_text("📭 Активных заявок нет.", reply_markup=back_main_keyboard())
         return
 
-    await q.message.edit_text(
-        "📋 Выберите сервис:",
-        reply_markup=services_keyboard(rows)
-    )
-
-
-async def choose_service(update, context):
-    q = update.callback_query
-    await q.answer()
-
-    service_id = int(q.data.split(":")[1])
-    service = get_service(service_id)
-
-    if not service:
-        await q.message.edit_text(
-            "❌ Сервис больше недоступен."
+    status_map = {
+        "queued": "⏳ В очереди",
+        "taken": "📩 Взят, ожидается код",
+        "pending_review": "🔎 Код на проверке",
+    }
+    text = "📊 <b>Ваши активные заявки:</b>\n\n"
+    for r in rows:
+        text += (
+            f"<b>#{r['id']}</b> | {r['service_name']}\n"
+            f"Номер: <code>{r['phone']}</code>\n"
+            f"Статус: {status_map.get(r['status'], r['status'])}\n"
+            f"————————————\n"
         )
-        return
-
-    context.user_data["creating_service"] = service_id
-
-    await q.message.edit_text(
-        f"🏪 {service['name']}\n"
-        f"💰 Начисление: ${service['price']:.2f}\n\n"
-        "📱 Отправьте номер для заявки."
-    )
+    await q.message.edit_text(text, reply_markup=back_main_keyboard(), parse_mode="HTML")
 
 
-# =========================
-# PHONE
-# =========================
-
-async def phone_input(update, context):
-    service_id = context.user_data.get("creating_service")
-
-    if not service_id:
-        return
-
-    phone = update.message.text.strip()
-
-    if len(phone) < 5 or len(phone) > 32:
-        await update.message.reply_text(
-            "❌ Проверьте номер и отправьте его ещё раз."
-        )
-        return
-
-    service = get_service(service_id)
-
-    if not service:
-        context.user_data.pop("creating_service", None)
-
-        await update.message.reply_text(
-            "❌ Сервис больше недоступен."
-        )
+async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
+    if not (2 <= len(text) <= 10):
         return
 
     active = user_active_requests(update.effective_user.id)
+    target = None
+    for r in active:
+        if r["status"] == "taken":
+            target = r
+            break
 
-    if active:
-        await update.message.reply_text(
-            "⚠️ У вас уже есть активная заявка."
-        )
-        context.user_data.pop("creating_service", None)
+    if not target:
         return
 
-    rid = create_request(
-        update.effective_user.id,
-        service_id,
-        phone
-    )
+    if not submit_code(target["id"], update.effective_user.id, text):
+        await update.message.reply_text("❌ Не удалось сохранить код.")
+        return
 
-    context.user_data.pop("creating_service", None)
+    log_action(update.effective_user.id, "send_code", target["id"], text)
 
     await update.message.reply_text(
-        f"✅ Заявка #{rid} создана!\n\n"
-        f"🏪 {service['name']}\n"
-        f"📱 {phone}\n"
-        f"💰 ${service['price']:.2f}\n\n"
-        "⏳ Ожидайте администратора."
+        "✅ <b>Код принят!</b>\n\n"
+        "Он отправлен администратору на проверку.\n"
+        "Ожидайте результата ⏳",
+        parse_mode="HTML"
     )
 
-
-# =========================
-# BALANCE
-# =========================
-
-async def balance(update, context):
-    q = update.callback_query
-    await q.answer()
-
-    b, total = get_balance(q.from_user.id)
-
-    await q.message.edit_text(
-        "💰 Баланс\n\n"
-        f"Доступно: ${b:.2f}\n"
-        f"Всего заработано: ${total:.2f}\n\n"
-        f"Минимальный вывод: ${MIN_WITHDRAWAL:.2f}"
+    notify_text = (
+        f"📨 <b>Код по номеру {target['phone']} получен!</b>\n\n"
+        f"🔹 Заявка: <b>#{target['id']}</b>\n"
+        f"🔹 Сервис: <b>{target['service_name']}</b>\n"
+        f"🔹 Код: <code>{text}</code>\n"
+        f"🔹 Сумма: <b>${target['service_price']:.2f}</b>\n\n"
+        f"Проверьте и зачислите или отклоните:"
     )
+    markup = review_keyboard(target["id"])
+
+    notified = set()
+    if target["admin_id"]:
+        try:
+            await context.bot.send_message(target["admin_id"], notify_text, reply_markup=markup, parse_mode="HTML")
+            notified.add(target["admin_id"])
+        except Exception:
+            pass
+
+    for a in list_admins():
+        if a["tg_id"] not in notified:
+            try:
+                await context.bot.send_message(a["tg_id"], notify_text, reply_markup=markup, parse_mode="HTML")
+                notified.add(a["tg_id"])
+            except Exception:
+                pass
+    for sa in SUPERADMIN_IDS:
+        if sa not in notified:
+            try:
+                await context.bot.send_message(sa, notify_text, reply_markup=markup, parse_mode="HTML")
+            except Exception:
+                pass
 
 
-# =========================
-# MY REQUESTS
-# =========================
-
-async def my_request(update, context):
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-
-    rows = user_active_requests(q.from_user.id)
-
-    if not rows:
-        await q.message.edit_text(
-            "📭 Активных заявок нет."
-        )
-        return
-
-    names = {
-        "queued": "⏳ В очереди",
-        "taken": "🔄 В работе",
-        "pending_review": "🔎 На проверке"
-    }
-
-    text = "📊 Ваши заявки:\n\n"
-
-    for r in rows:
-        text += (
-            f"#{r['id']} — {r['service_name']}\n"
-            f"📱 {r['phone']}\n"
-            f"{names.get(r['status'], r['status'])}\n\n"
-        )
-
-    await q.message.edit_text(text)
-
-
-# =========================
-# ADMIN PANEL
-# =========================
-
-async def admin_panel(update, context):
-    q = update.callback_query
-    await q.answer()
-
     if not has_admin_access(q.from_user.id):
-        await q.message.edit_text("❌ Доступ запрещён.")
+        await q.answer("Нет доступа", show_alert=True)
         return
-
-    rows = list_services()
-
-    await q.message.edit_text(
-        "🛠 Админка\n\n"
-        "Выберите сервис:",
-        reply_markup=admin_services_keyboard(rows)
-    )
+    await q.message.edit_text("🛠 <b>Админ-панель</b>", reply_markup=admin_menu(), parse_mode="HTML")
 
 
-# =========================
-# SERVICE QUEUE
-# =========================
-
-async def queue(update, context):
+async def admin_queues(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-
     if not has_admin_access(q.from_user.id):
         return
+    services = list_services()
+    if not services:
+        await q.message.edit_text("Нет сервисов.", reply_markup=admin_menu())
+        return
+    await q.message.edit_text(
+        "📥 Выберите сервис (отдельная очередь):",
+        reply_markup=admin_queues_keyboard(services)
+    )
 
+
+async def show_queue(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    if not has_admin_access(q.from_user.id):
+        return
     service_id = int(q.data.split(":")[1])
-
-    expire_old_requests()
-
     service = get_service(service_id)
-
-    if not service:
-        await q.message.edit_text("❌ Сервис не найден.")
-        return
-
     rows = queued_for_service(service_id)
 
     if not rows:
         await q.message.edit_text(
-            f"📭 Очередь «{service['name']}» пуста."
+            f"📭 Очередь «{service['name'] if service else '?'}» пуста.",
+            reply_markup=admin_queues_keyboard(list_services())
         )
         return
 
-    await q.message.edit_text(
-        f"📥 Очередь: {service['name']}\n\n"
-        f"Заявок: {len(rows)}"
+    r = rows[0]
+    text = (
+        f"📥 <b>{r['service_name']}</b>\n\n"
+        f"Заявка <b>#{r['id']}</b>\n"
+        f"Пользователь: <code>{r['user_id']}</code>\n"
+        f"Номер: <code>{r['phone']}</code>\n"
+        f"Цена: <b>${r['service_price']:.2f}</b>\n"
+        f"В очереди ещё: {len(rows) - 1}"
     )
-
-    for r in rows:
-        await q.message.reply_text(
-            f"📥 Заявка #{r['id']}\n\n"
-            f"👤 ID: {r['user_id']}\n"
-            f"🏪 {r['service_name']}\n"
-            f"📱 {r['phone']}\n"
-            f"💰 ${r['service_price']:.2f}",
-            reply_markup=take_request_keyboard(r["id"])
-        )
+    await q.message.edit_text(text, reply_markup=take_keyboard(r["id"]), parse_mode="HTML")
 
 
-# =========================
-# TAKE
-# =========================
-
-async def take_callback(update, context):
+async def take_request_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-
-    if not has_admin_access(q.from_user.id):
-        await q.answer(
-            "❌ Доступ запрещён.",
-            show_alert=True
-        )
-        return
-
     await q.answer()
+    if not has_admin_access(q.from_user.id):
+        return
 
     rid = int(q.data.split(":")[1])
-
     if not take_request(rid, q.from_user.id):
-        await q.answer(
-            "❌ Заявка уже взята.",
-            show_alert=True
-        )
+        await q.answer("❌ Заявка уже взята другим администратором.", show_alert=True)
         return
 
     r = get_request(rid)
-
-    if not r:
-        return
-
-    await q.message.edit_reply_markup(None)
-
-    await q.message.reply_text(
-        f"✅ Заявка #{rid} взята.\n\n"
-        f"🏪 {r['service_name']}\n"
-        f"📱 {r['phone']}"
+    await q.message.edit_text(
+        f"✅ Вы взяли заявку <b>#{rid}</b>\n"
+        f"Сервис: <b>{r['service_name']}</b>\n"
+        f"Номер: <code>{r['phone']}</code>\n"
+        f"Пользователь: <code>{r['user_id']}</code>\n\n"
+        f"Ожидайте код от пользователя.",
+        parse_mode="HTML"
     )
 
     try:
         await context.bot.send_message(
             r["user_id"],
-            f"📱 Ваша заявка #{rid} взята администратором.\n\n"
-            "Ожидайте дальнейших инструкций."
+            f"📨 <b>Ваш номер взят в работу!</b>\n\n"
+            f"📱 Номер: <code>{r['phone']}</code>\n"
+            f"🏷 Сервис: <b>{r['service_name']}</b>\n"
+            f"🔢 Заявка: <b>#{rid}</b>\n\n"
+            f"💻 Введите <b>ответом</b> на это сообщение код, который вам пришёл.\n"
+            f"<i>(от 2 до 10 символов)</i>",
+            parse_mode="HTML"
         )
     except Exception:
         pass
 
 
-# =========================
-# REVIEWS
-# =========================
-
-async def reviews(update, context):
+async def reviews(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-
     if not has_admin_access(q.from_user.id):
         return
-
     rows = get_pending_reviews()
-
     if not rows:
-        await q.message.edit_text(
-            "📭 Заявок на проверке нет."
-        )
+        await q.message.edit_text("📭 Кодов на проверке нет.", reply_markup=admin_menu())
         return
-
-    await q.message.edit_text(
-        f"🔎 На проверке: {len(rows)}"
-    )
 
     for r in rows:
         await q.message.reply_text(
-            f"📨 Заявка #{r['id']}\n\n"
-            f"👤 ID: {r['user_id']}\n"
-            f"🏪 {r['service_name']}\n"
-            f"📱 {r['phone']}\n"
-            f"💰 ${r['price']:.2f}",
-            reply_markup=review_keyboard(r["id"])
+            f"📨 <b>Заявка #{r['id']}</b>\n"
+            f"Сервис: <b>{r['service_name']}</b>\n"
+            f"Номер: <code>{r['phone']}</code>\n"
+            f"Код: <code>{r['code']}</code>\n"
+            f"Сумма: <b>${r['service_price']:.2f}</b>",
+            reply_markup=review_keyboard(r["id"]),
+            parse_mode="HTML"
         )
 
 
-# =========================
-# REVIEW ACTION
-# =========================
-
-async def review(update, context):
+async def review_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-
+    await q.answer()
     if not has_admin_access(q.from_user.id):
-        await q.answer(
-            "❌ Доступ запрещён.",
-            show_alert=True
-        )
         return
 
-    await q.answer()
-
-    action, rid = q.data.split(":")
-    rid = int(rid)
-
-    result = review_request(
-        rid,
-        q.from_user.id,
-        action == "approve"
-    )
+    action, rid_str = q.data.split(":")
+    rid = int(rid_str)
+    result = review_request(rid, q.from_user.id, action == "approve")
 
     if not result:
-        await q.message.edit_text(
-            "❌ Заявка уже обработана."
-        )
+        await q.answer("❌ Заявка уже обработана.", show_alert=True)
         return
 
     if action == "approve":
-        await q.message.edit_text(
-            f"✅ Заявка #{rid} подтверждена.\n\n"
-            f"💰 Начислено: ${result['price']:.2f}"
+        await q.message.edit_text(f"✅ Заявка #{rid} подтверждена.\nНачислено: ${result['price']:.2f}")
+        user_msg = (
+            f"✅ <b>Код подтверждён!</b>\n\n"
+            f"Заявка: <b>#{rid}</b>\n"
+            f"💰 Начислено: <b>${result['price']:.2f}</b>\n\n"
+            f"Спасибо за работу! 🎉"
         )
-
-        text = (
-            f"✅ Заявка #{rid} подтверждена!\n\n"
-            f"💰 Начислено: ${result['price']:.2f}"
-        )
-
     else:
-        await q.message.edit_text(
-            f"❌ Заявка #{rid} отклонена."
-        )
-
-        text = (
-            f"❌ Заявка #{rid} отклонена.\n\n"
-            "Начисление не произведено."
+        await q.message.edit_text(f"❌ Заявка #{rid} отклонена.")
+        user_msg = (
+            f"❌ <b>Код отклонён</b>\n\n"
+            f"Заявка: <b>#{rid}</b>\n"
+            f"Начисление не произведено."
         )
 
     try:
-        await context.bot.send_message(
-            result["user_id"],
-            text
-        )
+        await context.bot.send_message(result["user_id"], user_msg, parse_mode="HTML")
     except Exception:
         pass
 
 
-# =========================
-# CLEAR QUEUE
-# =========================
-
-async def clear_queue_confirm(update, context):
+async def superadmin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-
-    if not has_admin_access(q.from_user.id):
-        return
-
-    await q.message.edit_text(
-        "⚠️ Вы уверены?\n\n"
-        "Все заявки во всех очередях будут отменены.",
-        reply_markup=clear_queue_keyboard()
-    )
-
-
-async def clear_queue_callback(update, context):
-    q = update.callback_query
-    await q.answer()
-
-    if not has_admin_access(q.from_user.id):
-        return
-
-    count = clear_queue()
-
-    await q.message.edit_text(
-        f"🗑 Очередь очищена.\n\n"
-        f"Отменено заявок: {count}"
-    )
-
-
-# =========================
-# OWNER
-# =========================
-
-async def owner_panel(update, context):
-    q = update.callback_query
-    await q.answer()
-
     if not is_superadmin(q.from_user.id):
-        await q.message.edit_text(
-            "❌ Только владелец."
-        )
+        await q.answer("Нет доступа", show_alert=True)
         return
-
-    await q.message.edit_text(
-        "👑 Панель владельца\n\n"
-        "Выберите действие:",
-        reply_markup=owner_panel_keyboard()
-    )
+    await q.message.edit_text("👑 <b>Супер-админ панель</b>", reply_markup=superadmin_menu(), parse_mode="HTML")
 
 
-async def statistics(update, context):
+async def sa_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-
     if not is_superadmin(q.from_user.id):
         return
-
-    s = get_statistics()
-
-    await q.message.edit_text(
-        "📊 Статистика\n\n"
-        f"👤 Пользователей: {s['users']}\n"
-        f"📥 Всего заявок: {s['total']}\n"
-        f"⏳ В очереди: {s['queued']}\n"
-        f"🔄 В работе: {s['taken']}\n"
-        f"🔎 На проверке: {s['pending']}\n"
-        f"✅ Выполнено: {s['approved']}\n"
-        f"❌ Отклонено: {s['rejected']}\n"
-        f"⌛ Истекло: {s['expired']}\n\n"
-        f"💰 Начислено: ${s['paid']:.2f}",
-        reply_markup=back_keyboard("owner")
+    s = get_stats()
+    text = (
+        f"📊 <b>Статистика Willy SMS 24/7</b>\n\n"
+        f"👥 Пользователей: <b>{s['users']}</b>\n"
+        f"🏷 Активных сервисов: <b>{s['services']}</b>\n"
+        f"🛡 Админов: <b>{s['admins']}</b>\n\n"
+        f"📥 Всего заявок: <b>{s['total_requests']}</b>\n"
+        f"⏳ В очереди: <b>{s['queued']}</b>\n"
+        f"📱 Взято: <b>{s['taken']}</b>\n"
+        f"🔎 На проверке: <b>{s['pending']}</b>\n"
+        f"✅ Подтверждено: <b>{s['approved']}</b>\n"
+        f"❌ Отклонено: <b>{s['rejected']}</b>\n\n"
+        f"💰 Всего заработано юзерами: <b>${s['total_earned']:.2f}</b>\n"
+        f"💳 На балансах сейчас: <b>${s['total_balance']:.2f}</b>\n\n"
+        f"💸 Выплаты в ожидании: <b>{s['pending_wd_count']}</b> на ${s['pending_wd_sum']:.2f}\n"
+        f"✅ Выплачено: <b>{s['paid_wd_count']}</b> на ${s['paid_wd_sum']:.2f}\n"
     )
+    if s["top_services"]:
+        text += "\n🏆 <b>Топ сервисов:</b>\n"
+        for name, cnt, earned in s["top_services"]:
+            text += f"• {name}: {cnt} заявок (${earned:.2f})\n"
+    await q.message.edit_text(text, reply_markup=superadmin_menu(), parse_mode="HTML")
 
 
-# =========================
-# OWNER SERVICES
-# =========================
-
-async def owner_services(update, context):
+async def sa_services(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-
     if not is_superadmin(q.from_user.id):
         return
-
     rows = list_services()
-
-    await q.message.edit_text(
-        "📋 Управление сервисами:",
-        reply_markup=owner_services_keyboard(rows)
-    )
-
-
-async def add_service_start(update, context):
-    q = update.callback_query
-    await q.answer()
-
-    if not is_superadmin(q.from_user.id):
-        return
-
-    context.user_data["owner_action"] = "add_service_name"
-
-    await q.message.edit_text(
-        "➕ Введите название нового сервиса:"
-    )
-
-
-# =========================
-# OWNER ADMINS
-# =========================
-
-async def owner_admins(update, context):
-    q = update.callback_query
-    await q.answer()
-
-    if not is_superadmin(q.from_user.id):
-        return
-
-    admins = list_admins()
-
-    await q.message.edit_text(
-        "👥 Администраторы:",
-        reply_markup=owner_admins_keyboard(admins)
-    )
-
-
-async def add_admin_start(update, context):
-    q = update.callback_query
-    await q.answer()
-
-    if not is_superadmin(q.from_user.id):
-        return
-
-    context.user_data["owner_action"] = "add_admin"
-
-    await q.message.edit_text(
-        "➕ Отправьте Telegram ID нового администратора:"
-    )
-
-
-# =========================
-# TEXT INPUT
-# =========================
-
-async def text_input(update, context):
-
-    # Номер заявки
-    if context.user_data.get("creating_service"):
-        await phone_input(update, context)
-        return
-
-    action = context.user_data.get("owner_action")
-
-    # Название сервиса
-    if action == "add_service_name":
-        name = update.message.text.strip()
-
-        if not name:
-            return
-
-        context.user_data["new_service_name"] = name
-        context.user_data["owner_action"] = "add_service_price"
-
-        await update.message.reply_text(
-            "💰 Отправьте цену сервиса.\n\n"
-            "Например: 0.70"
-        )
-        return
-
-    # Цена сервиса
-    if action == "add_service_price":
-        try:
-            price = parse_price(
-                update.message.text.strip()
-            )
-        except Exception:
-            await update.message.reply_text(
-                "❌ Неверная цена."
-            )
-            return
-
-        name = context.user_data.get(
-            "new_service_name"
-        )
-
-        try:
-            sid = add_service(name, price)
-        except Exception:
-            await update.message.reply_text(
-                "❌ Такой сервис уже существует."
-            )
-            return
-
-        context.user_data.clear()
-
-        await update.message.reply_text(
-            f"✅ Сервис добавлен!\n\n"
-            f"#{sid} {name}\n"
-            f"💰 ${price:.2f}"
-        )
-        return
-
-    # Добавление администратора
-    if action == "add_admin":
-        try:
-            tg_id = int(update.message.text.strip())
-        except ValueError:
-            await update.message.reply_text(
-                "❌ Telegram ID должен быть числом."
-            )
-            return
-
-        add_admin(tg_id)
-
-        context.user_data.clear()
-
-        await update.message.reply_text(
-            "✅ Администратор добавлен."
-        )
-        return
-
-
-# =========================
-# COMMANDS
-# =========================
-
-async def add_cmd(update, context):
-    if not is_superadmin(update.effective_user.id):
-        return
-
-    if len(context.args) < 2:
-        await update.message.reply_text(
-            "Использование: /add Название 0.70"
-        )
-        return
-
-    name = " ".join(context.args[:-1])
-    price = parse_price(context.args[-1])
-
-    try:
-        sid = add_service(name, price)
-    except Exception:
-        await update.message.reply_text(
-            "❌ Такой сервис уже существует."
-        )
-        return
-
-    await update.message.reply_text(
-        f"✅ Сервис добавлен: #{sid} "
-        f"{name} — ${price:.2f}"
-    )
-
-
-async def del_cmd(update, context):
-    if not is_superadmin(update.effective_user.id):
-        return
-
-    if not context.args:
-        return
-
-    try:
-        service_id = int(context.args[0])
-    except ValueError:
-        await update.message.reply_text(
-            "❌ ID должен быть числом."
-        )
-        return
-
-    ok = delete_service(service_id)
-
-    await update.message.reply_text(
-        "✅ Сервис удалён."
-        if ok
-        else
-        "❌ Сервис не найден."
-    )
-
-
-async def list_cmd(update, context):
-    if not is_superadmin(update.effective_user.id):
-        return
-
-    rows = list_services()
-
+    text = "📋 <b>Сервисы:</b>\n\n"
     if not rows:
-        await update.message.reply_text(
-            "📭 Сервисов нет."
-        )
+        text += "Пусто"
+    else:
+        for r in rows:
+            text += f"#{r['id']} — {r['name']} — ${r['price']:.2f}\n"
+    text += "\nКоманды:\n/add Название цена\n/del ID\n/list"
+    await q.message.edit_text(text, reply_markup=superadmin_menu(), parse_mode="HTML")
+
+
+async def sa_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    if not is_superadmin(q.from_user.id):
         return
+    rows = list_admins()
+    text = "👥 <b>Администраторы:</b>\n\n"
+    if not rows:
+        text += "Пусто\n"
+    else:
+        for r in rows:
+            text += f"• <code>{r['tg_id']}</code> (@{r['username'] or '—'})\n"
+    text += "\nКоманды:\n/addadmin ID\n/deladmin ID"
+    await q.message.edit_text(text, reply_markup=superadmin_menu(), parse_mode="HTML")
 
-    await update.message.reply_text(
-        "\n".join(
-            f"#{r['id']} — {r['name']} — ${r['price']:.2f}"
-            for r in rows
-        )
-    )
+
+async def sa_withdrawals(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    if not is_superadmin(q.from_user.id):
+        return
+    rows = get_pending_withdrawals()
+    text = "💳 <b>Ожидающие выплаты:</b>\n\n"
+    if not rows:
+        text += "Нет"
+    else:
+        for r in rows:
+            text += f"#{r['id']} | user <code>{r['user_id']}</code> | ${r['amount']:.2f}\n"
+    text += "\nКоманды:\n/pay ID — выплатить\n/fail ID — отклонить и вернуть"
+    await q.message.edit_text(text, reply_markup=superadmin_menu(), parse_mode="HTML")
 
 
-async def addadmin_cmd(update, context):
+async def add_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_superadmin(update.effective_user.id):
         return
-
-    if not context.args:
+    if len(context.args) < 2:
+        await update.message.reply_text("Использование: /add Самокат 0.5")
         return
-
+    name = " ".join(context.args[:-1])
     try:
-        tg_id = int(context.args[0])
-    except ValueError:
-        return
-
-    add_admin(
-        tg_id,
-        ""
-    )
-
-    await update.message.reply_text(
-        "✅ Администратор добавлен."
-    )
+        price = parse_price(context.args[-1])
+        sid = add_service(name, price)
+        log_action(update.effective_user.id, "add_service", details=f"{sid}:{name}:{price}")
+        await update.message.reply_text(f"✅ Сервис добавлен: #{sid} {name} — ${price:.2f}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
 
 
-async def deladmin_cmd(update, context):
+async def del_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_superadmin(update.effective_user.id):
         return
+    if not context.args:
+        await update.message.reply_text("Использование: /del ID")
+        return
+    ok = delete_service(int(context.args[0]))
+    await update.message.reply_text("✅ Удалён" if ok else "❌ Не найден")
 
+
+async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_superadmin(update.effective_user.id):
+        return
+    rows = list_services()
+    text = "\n".join(f"#{r['id']} — {r['name']} — ${r['price']:.2f}" for r in rows) or "Пусто"
+    await update.message.reply_text(text)
+
+
+async def addadmin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_superadmin(update.effective_user.id):
+        return
+    if not context.args:
+        await update.message.reply_text("Использование: /addadmin TELEGRAM_ID")
+        return
+    add_admin(int(context.args[0]))
+    log_action(update.effective_user.id, "add_admin", details=context.args[0])
+    await update.message.reply_text("✅ Админ добавлен")
+
+
+async def deladmin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_superadmin(update.effective_user.id):
+        return
     if not context.args:
         return
+    remove_admin(int(context.args[0]))
+    log_action(update.effective_user.id, "del_admin", details=context.args[0])
+    await update.message.reply_text("✅ Админ удалён")
 
-    try:
-        tg_id = int(context.args[0])
-    except ValueError:
+
+async def pay_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_superadmin(update.effective_user.id):
         return
+    if not context.args:
+        await update.message.reply_text("Использование: /pay ID")
+        return
+    ok = process_withdrawal(int(context.args[0]), success=True)
+    await update.message.reply_text("✅ Выплачено" if ok else "❌ Не найдено / уже обработано")
 
-    remove_admin(tg_id)
 
-    await update.message.reply_text(
-        "✅ Администратор удалён."
-    )
+async def fail_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_superadmin(update.effective_user.id):
+        return
+    if not context.args:
+        await update.message.reply_text("Использование: /fail ID")
+        return
+    ok = process_withdrawal(int(context.args[0]), success=False)
+    await update.message.reply_text("✅ Отклонено, средства возвращены" if ok else "❌ Ошибка")
 
 
-async def take_cmd(update, context):
-    await update.message.reply_text(
-        "📥 Используйте кнопку «Взять заявку» "
-        "в очереди."
-    )
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    await update.message.reply_text("Отменено.", reply_markup=main_menu(
+        has_admin_access(update.effective_user.id),
+        is_superadmin(update.effective_user.id)
+    ))
+    return ConversationHandler.END
