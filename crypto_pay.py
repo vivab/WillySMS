@@ -31,8 +31,7 @@ async def transfer_crypto(user_id: int, amount: float, spend_id: str, comment: s
         "amount": f"{amount:.2f}",
         "spend_id": spend_id,
     }
-    if comment:
-        payload["comment"] = comment[:1024]
+    # comment не отправляем
 
     headers = {"Crypto-Pay-API-Token": CRYPTO_PAY_TOKEN}
 
