@@ -64,8 +64,6 @@ def init_db():
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
         """)
-        # Включаем WAL-режим, чтобы читатели и писатели меньше блокировали друг друга,
-        # и увеличиваем таймаут ожидания снятия блокировки.
         c.execute("PRAGMA journal_mode=WAL;")
         c.execute("PRAGMA busy_timeout=5000;")
 
@@ -174,11 +172,6 @@ def queued_for_service(service_id: int):
 
 
 def take_request(request_id: int, admin_id: int) -> bool:
-    # ВАЖНО: log_action открывает СВОЁ отдельное соединение с БД.
-    # Если вызвать её внутри ещё не завершённого блока `with connect() as c:`,
-    # второе соединение натыкается на блокировку первого -> "database is locked".
-    # Поэтому сначала полностью завершаем (и коммитим) обновление, закрываем
-    # соединение, и только потом логируем действие отдельным вызовом.
     with connect() as c:
         cur = c.execute("""
             UPDATE requests
@@ -216,9 +209,6 @@ def get_pending_reviews():
 
 
 def review_request(request_id: int, admin_id: int, approve: bool):
-    # Та же логика, что и в take_request: сначала завершаем транзакцию
-    # с обновлением статуса/баланса, закрываем соединение, и только
-    # потом отдельно логируем действие через log_action.
     with connect() as c:
         row = c.execute("""
             SELECT r.*, s.price
@@ -279,7 +269,7 @@ def get_pending_withdrawals():
         ).fetchall()
 
 
-def process_withdrawal(withdrawal_id: int, success: bool) -> bool:
+def process_withdrawal(withdrawal_id: int, success: bool, external_id: str = None) -> bool:
     with connect() as c:
         row = c.execute(
             "SELECT * FROM withdrawals WHERE id = ? AND status = 'pending'", (withdrawal_id,)
@@ -288,8 +278,8 @@ def process_withdrawal(withdrawal_id: int, success: bool) -> bool:
             return False
         new_status = "paid" if success else "failed"
         c.execute(
-            "UPDATE withdrawals SET status = ?, paid_at = CURRENT_TIMESTAMP WHERE id = ?",
-            (new_status, withdrawal_id)
+            "UPDATE withdrawals SET status = ?, paid_at = CURRENT_TIMESTAMP, external_id = ? WHERE id = ?",
+            (new_status, external_id, withdrawal_id)
         )
         if not success:
             c.execute(
